@@ -1,10 +1,18 @@
-from icalendar import Calendar
-from datetime import date, datetime, timedelta
 import os
 import urllib
+from icalendar import Calendar
+from datetime import date, datetime, timedelta
+from dotenv import load_dotenv
 
+load_dotenv()
 root = os.getcwd()+'\\'
 today = date.today()
+calendar_files = root + '\\calendar_files'
+calendar_url = os.getenv('TIMESHEET')
+
+# set up calendar folder
+if not os.path.isdir(calendar_files):
+    os.mkdir(calendar_files)
 
 def get_ical_from_folder(filepath, ext='.ics') -> str:
     # get ical from root directory
@@ -17,6 +25,7 @@ def get_ical_from_folder(filepath, ext='.ics') -> str:
 
 def get_ical_from_url(file = 'calendar_list.json') -> dict:
     # retrieve ical from web make into a dictionary
+    # TODO leaving everything in memory, may need to change this to files?
     calendars = {}
     with open(file,'r') as j:
         cal = json.load(j)
@@ -52,6 +61,11 @@ for emp_name, calendar in cal_dict.items():
             start_time = component.get('dtstart').dt
             end_time = component.get('dtend').dt
 
+            #computed metrics
+            dayshours = end_time-start_time
+            days = dayshours.days
+            hours = round(dayshours.total_seconds()/3600,2)
+
             print(summary)
             print(busy_status)
             #print(datestamp)
@@ -82,7 +96,13 @@ for component in calendar.walk():
         print(days)
         print(hours)
 
-       #if start_time >= today and end_time <= today:
+        #less than 1 day
+        #more than 1 day
+        #hours less than 7.5
+        #hours more than 7.5
+        #create values for days between if more than 1 day fill 23,24,25, etc?
+
+        #if start_time >= today and end_time <= today:
         # TODO -- compute hours from start/end <<<< they write one, but put hrs in comments
 
 

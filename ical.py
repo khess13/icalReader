@@ -1,24 +1,26 @@
 import os
 import urllib
-import re
+import json
+# import re
 from icalendar import Calendar
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from dotenv import load_dotenv
-#from pandas import DataFrame
-from openpyxl import Workbook, load_workbook
+# from pandas import DataFrame
+from openpyxl import load_workbook
 
 load_dotenv()
 ROOT = os.getcwd()+'\\'
 TODAY = date.today()
-#calendar_files = ROOT + '\\calendar_files'
+# calendar_files = ROOT + '\\calendar_files'
 CALENDAR_URL = os.getenv('TIMESHEET')
 
-with open('abs.json','rb') as j:
+with open('abs.json', 'rb') as j:
     ABS_REASONS = json.load(j)
 
 # set up calendar folder
-#if not os.path.isdir(calendar_files):
+# if not os.path.isdir(calendar_files):
 #    os.mkdir(calendar_files)
+
 
 def get_ical_from_folder(filepath, ext='.ics') -> str:
     # get ical from ROOT directory
@@ -29,22 +31,25 @@ def get_ical_from_folder(filepath, ext='.ics') -> str:
     else:
         return ROOT+loc_list[0]
 
-def get_ical_from_url(file = 'calendar_list.json') -> dict:
+
+def get_ical_from_url(file='calendar_list.json') -> dict:
     # retrieve ical from web make into a dictionary
     # TODO leaving everything in memory, may need to change this to files?
     calendars = {}
-    with open(file,'r') as j:
+    with open(file, 'r') as j:
         cal = json.load(j)
     for emp, link in cal.items():
         c = urllib.urlopen(link)
         calendars[emp] = c.read()
     return calendars
 
+
 def retrieve_ical_from_file(location) -> Calendar():
-    #open ical doc at location
-    with open(location,'rb') as f:
+    # open ical doc at location
+    with open(location, 'rb') as f:
         cal_object = Calendar.from_ical(f.read())
     return cal_object
+
 
 def return_updated_dayshrs(days, hours) -> str:
     # decision points
@@ -58,16 +63,20 @@ def return_updated_dayshrs(days, hours) -> str:
     # hours more than 7.5
     elif hours > 8:
         return str(days)
-    # TODO -- create values for days between if more than 1 day fill 23,24,25, etc?
+    # TODO -- create values for days between if more than 1 day fill 23,24,25...
+
 
 def abs_type(text_from_calendar) -> str:
     # TODO takes string from summary tries to determine what it is
     pass
 
+
 def calendar_filter(component) -> str:
     # returns data for further processing
-    if component.name == 'VEVENT' and component.get('X-MICROSOFT-CDO-BUSYSTATUS') == 'OOF':
+    if component.name == 'VEVENT'\
+       and component.get('X-MICROSOFT-CDO-BUSYSTATUS') == 'OOF':
         return component
+
 
 def get_datetime(component) -> datetime:
     # return dt from component
@@ -77,35 +86,36 @@ def get_datetime(component) -> datetime:
     dend_time = component.get('dtend').dt
     return dstart_time, dend_time
 
+
 def get_string_info(component) -> str:
     # return text from component
     dsummary = component.get('summary')
-    dbusy_status =  component.get('X-MICROSOFT-CDO-BUSYSTATUS')
+    dbusy_status = component.get('X-MICROSOFT-CDO-BUSYSTATUS')
     return dsummary, dbusy_status
 
 
-
 # retrieve from file for testing
-file = get_ical_from_folder(ROOT)
-calendar = retrieve_ical_from_file(file)
+# file = get_ical_from_folder(ROOT)
+# calendar = retrieve_ical_from_file(file)
 # retrieve from url
 # TODO -- steps
-# cal_dict = get_ical_from_url()
+cal_dict = get_ical_from_url()
 
-for emp_name, calendar in cal_dict.items():
+for emp_name, cal in cal_dict.items():
     print(emp_name)
+    calendar = retrieve_ical_from_file(cal)
     for component in calendar.walk():
         start_time, end_time = get_datetime(component)
         summary, busy_status = get_string_info(component)
 
-        #computed metrics
+        # computed metrics
         dayshours = end_time-start_time
         days = dayshours.days
-        hours = round(dayshours.total_seconds()/3600,2)
+        hours = round(dayshours.total_seconds()/3600, 2)
 
         print(summary)
         print(busy_status)
-        #print(datestamp)
+        # print(datestamp)
         print(start_time)
         print(end_time)
 
@@ -136,7 +146,8 @@ for component in calendar.walk():
 
 
 # TODO -- get for week? just today?
-# API access spreadsheet https://docs.microsoft.com/en-us/graph/excel-write-to-workbook --- this looks too hard
+# API access spreadsheet
+# https://docs.microsoft.com/en-us/graph/excel-write-to-workbook --this looks too hard
 
 # accessing workbook files
 

@@ -1,7 +1,8 @@
 import os
-import urllib
 import json
 # import re
+import urllib.request
+import pytz
 from icalendar import Calendar
 from datetime import date, datetime
 from dotenv import load_dotenv
@@ -9,18 +10,19 @@ from dotenv import load_dotenv
 from openpyxl import load_workbook
 
 load_dotenv()
+utc = pytz.UTC
 ROOT = os.getcwd()+'\\'
 TODAY = date.today()
 # calendar_files = ROOT + '\\calendar_files'
 CALENDAR_URL = os.getenv('TIMESHEET')
 
-with open('abs.json', 'rb') as j:
-    ABS_REASONS = json.load(j)
-
 # set up calendar folder
 # if not os.path.isdir(calendar_files):
 #    os.mkdir(calendar_files)
-
+def json_loader(jsonfile) -> str:
+    # opens files and returns struct
+    with open(jsonfile,'rb') as j:
+        return json.load(j)
 
 def get_ical_from_folder(filepath, ext='.ics') -> str:
     # get ical from ROOT directory
@@ -31,25 +33,22 @@ def get_ical_from_folder(filepath, ext='.ics') -> str:
     else:
         return ROOT+loc_list[0]
 
-
 def get_ical_from_url(file='calendar_list.json') -> dict:
     # retrieve ical from web make into a dictionary
     # TODO leaving everything in memory, may need to change this to files?
     calendars = {}
-    with open(file, 'r') as j:
-        cal = json.load(j)
+    cal = json_loader(file)
     for emp, link in cal.items():
-        c = urllib.urlopen(link)
-        calendars[emp] = c.read()
+        c = urllib.request.urlopen(link)
+        # return Calendar Object in dict
+        calendars[emp] = Calendar.from_ical(c.read())
     return calendars
-
 
 def retrieve_ical_from_file(location) -> Calendar():
     # open ical doc at location
     with open(location, 'rb') as f:
         cal_object = Calendar.from_ical(f.read())
     return cal_object
-
 
 def return_updated_dayshrs(days, hours) -> str:
     # decision points
@@ -70,14 +69,6 @@ def abs_type(text_from_calendar) -> str:
     # TODO takes string from summary tries to determine what it is
     pass
 
-
-def calendar_filter(component) -> str:
-    # returns data for further processing
-    if component.name == 'VEVENT'\
-       and component.get('X-MICROSOFT-CDO-BUSYSTATUS') == 'OOF':
-        return component
-
-
 def get_datetime(component) -> datetime:
     # return dt from component
     # date and time file was pulled?
@@ -86,38 +77,51 @@ def get_datetime(component) -> datetime:
     dend_time = component.get('dtend').dt
     return dstart_time, dend_time
 
-
 def get_string_info(component) -> str:
     # return text from component
     dsummary = component.get('summary')
     dbusy_status = component.get('X-MICROSOFT-CDO-BUSYSTATUS')
     return dsummary, dbusy_status
 
+def calendar_filter(component, target_date) -> bool:
+    # returns data for further processing
+    if component.name == 'VEVENT' and component.get('X-MICROSOFT-CDO-BUSYSTATUS') == 'OOF':
+        st_t, en_t = get_datetime(component)
+        if st_t.replace(tzinfo=utc) <= target_date <= en_t.replace(tzinfo=utc):
+            return True
+    return False
 
 # retrieve from file for testing
 # file = get_ical_from_folder(ROOT)
 # calendar = retrieve_ical_from_file(file)
 # retrieve from url
+ABS_REASONS = json_loader('abs.json')
+
 # TODO -- steps
 cal_dict = get_ical_from_url()
+# testing date
+DATE = datetime(2022, 7, 1).replace(tzinfo=utc)
+# DATE = date.today()
 
 for emp_name, cal in cal_dict.items():
     print(emp_name)
-    calendar = retrieve_ical_from_file(cal)
+    # calendar = retrieve_ical_from_file(cal)
+    calendar = cal
     for component in calendar.walk():
-        start_time, end_time = get_datetime(component)
-        summary, busy_status = get_string_info(component)
+        if calendar_filter(component, DATE):
+            start_time, end_time = get_datetime(component)
+            summary, busy_status = get_string_info(component)
 
-        # computed metrics
-        dayshours = end_time-start_time
-        days = dayshours.days
-        hours = round(dayshours.total_seconds()/3600, 2)
+            # computed metrics
+            dayshours = end_time-start_time
+            days = dayshours.days
+            hours = round(dayshours.total_seconds()/3600, 2)
 
-        print(summary)
-        print(busy_status)
-        # print(datestamp)
-        print(start_time)
-        print(end_time)
+            print(summary)
+            print(busy_status)
+            # print(datestamp)
+            print(start_time)
+            print(end_time)
 
 '''
 # Testing 1 loop

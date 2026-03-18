@@ -1,14 +1,28 @@
 """
-PST to Salesforce CSV Extractor
-================================
+PST to Salesforce CSV Extractor  (Standard EmailMessage Object)
+===============================================================
 Extracts emails and attachments from an Outlook .pst file and exports
-them into multiple relational CSV files ready for Salesforce import.
+them into multiple relational CSV files ready for Salesforce import
+using the STANDARD Salesforce objects.
 
-Output Tables (CSV files):
-  - emails.csv           → EmailMessage__c (or Task/EmailMessage object)
-  - recipients.csv       → EmailRecipient__c (To/CC/BCC lines)
-  - attachments.csv      → Attachment or ContentVersion (metadata)
-  - attachment_files/    → Raw attachment binaries (optional save)
+Output Tables (CSV files) — load in this order:
+  1. emails.csv                → EmailMessage  (Insert)
+  2. email_relations.csv       → EmailMessageRelation  (Insert)
+  3. content_versions.csv      → ContentVersion  (Insert — auto-creates ContentDocument)
+  4. content_document_links.csv → ContentDocumentLink  (Insert)
+  5. email_status_update.csv   → EmailMessage  (Update Status to 3=Sent)
+
+  attachment_files/            → Raw attachment binaries (--save-attachments flag)
+
+⚠️  IMPORTANT LOADING RULES (Salesforce quirks):
+  - DO NOT set Status=3 (Sent) during initial EmailMessage insert — it locks the
+    record and blocks all child inserts. Load status last (step 5).
+  - DO NOT set CreatedById unless IsClientManaged=TRUE, or only the original
+    user can delete the record (even admins cannot).
+  - Set IsClientManaged=TRUE to bypass both of the above restrictions.
+  - EmailMessageRelation has NO external ID field — use Insert (not Upsert).
+  - For ContentVersion, set FirstPublishLocationId = EmailMessage.Id to
+    automatically create the ContentDocumentLink (skips step 4).
 
 Requirements:
     pip install libpff-python pandas tqdm
@@ -283,68 +297,108 @@ class PSTExtractor:
 
 
 # ---------------------------------------------------------------------------
-# CSV export
+# CSV export  —  Standard Salesforce object field mappings
 # ---------------------------------------------------------------------------
-
-# Salesforce field-name mappings  (internal name → Salesforce API name)
-# Adjust these to match your actual Salesforce object/field API names.
+#
+# EmailMessage  (standard object)
+# --------------------------------
+# ExternalId__c  →  a custom External ID field YOU must create on EmailMessage
+#                   in your org (Text, Unique, ExternalId=true).
+# Status is intentionally OMITTED here — set it in a separate update CSV
+# after all child records are loaded (see email_status_update.csv).
+#
 SF_EMAIL_FIELDS = {
-    "Id":              "External_Id__c",
-    "MessageId":       "Message_Id__c",
-    "Subject":         "Subject__c",
-    "SenderName":      "Sender_Name__c",
-    "SenderEmail":     "Sender_Email__c",
-    "SentDate":        "Sent_Date__c",
-    "BodyPlain":       "Body_Plain__c",
-    "BodyHtml":        "Body_Html__c",
-    "Importance":      "Importance__c",
-    "HasAttachments":  "Has_Attachments__c",
-    "AttachmentCount": "Attachment_Count__c",
-    "FolderPath":      "Folder_Path__c",
+    "Id":          "ExternalId__c",   # custom ext-id field you create in your org
+    "Subject":     "Subject",
+    "SenderName":  "FromName",
+    "SenderEmail": "FromAddress",
+    "SentDate":    "MessageDate",
+    "BodyPlain":   "TextBody",
+    "BodyHtml":    "HtmlBody",
+    # ToAddress / CcAddress / BccAddress are simple semicolon-delimited strings
+    # on EmailMessage — populated from the recipients list at export time.
+    "ToAddress":   "ToAddress",
+    "CcAddress":   "CcAddress",
+    "BccAddress":  "BccAddress",
+    # IsClientManaged=TRUE bypasses the Status lock and CreatedById restriction.
+    "IsClientManaged": "IsClientManaged",
+    # Helpful for traceability — store the original PST folder path.
+    "FolderPath":  "Description",     # repurpose Description, or omit if unused
 }
 
-SF_RECIPIENT_FIELDS = {
-    "Id":              "External_Id__c",
-    "EmailId":         "Email__r.External_Id__c",   # external ID relationship
-    "RecipientType":   "Recipient_Type__c",
-    "DisplayName":     "Display_Name__c",
-    "EmailAddress":    "Email_Address__c",
+# EmailMessageRelation  (standard junction object — NOT customisable, no ext-id)
+# Load with Insert (not Upsert).
+# EmailMessageId must be the real Salesforce Id returned after EmailMessage insert.
+# RelationType picklist: ToAddress | CcAddress | BccAddress | FromAddress | OtherAddress
+SF_EMAIL_RELATION_FIELDS = {
+    "EmailMessageId": "EmailMessageId",  # SF Id from step-1 result file
+    "RelationType":   "RelationType",
+    "RelationAddress":"RelationAddress",
+    # ContactId / LeadId / UserId — leave blank if you don't have SF person IDs yet;
+    # Salesforce will attempt a lookup by RelationAddress.
+    "ContactId":      "RelationId",      # set to matched Contact/Lead/User SF Id
 }
 
-SF_ATTACHMENT_FIELDS = {
-    "Id":              "External_Id__c",
-    "EmailId":         "Email__r.External_Id__c",
-    "FileName":        "File_Name__c",
-    "MimeType":        "Mime_Type__c",
-    "SizeBytes":       "Size_Bytes__c",
-    "SHA256":          "SHA256__c",
-    "ContentId":       "Content_Id__c",
-    "SavedFilePath":   "Saved_File_Path__c",
+# ContentVersion  (stores the actual attachment binary)
+# Salesforce auto-creates ContentDocument when you insert ContentVersion.
+# Set FirstPublishLocationId = EmailMessage SF Id to auto-link (skips ContentDocumentLink).
+SF_CONTENT_VERSION_FIELDS = {
+    "Id":                      "ExternalId__c",       # custom ext-id on ContentVersion
+    "EmailSfId":               "FirstPublishLocationId",  # EmailMessage SF Id (from step-1)
+    "FileName":                "Title",
+    "FileName":                "PathOnClient",         # must match Title for Data Loader
+    "MimeType":                "VersionDataUrl",       # see note below *
+    "SizeBytes":               "ContentSize",
+    "SHA256":                  "Checksum",
+    # VersionData (the actual binary) cannot be set via CSV — use Data Loader binary upload
+    # or Salesforce Bulk API with base64-encoded body.
+}
+
+# ContentDocumentLink  (only needed if NOT using FirstPublishLocationId above)
+# LinkedEntityId = EmailMessage SF Id, ContentDocumentId = from ContentVersion query
+SF_CONTENT_DOC_LINK_FIELDS = {
+    "ContentDocumentId": "ContentDocumentId",  # from post-insert ContentVersion query
+    "LinkedEntityId":    "LinkedEntityId",     # EmailMessage SF Id
+    "ShareType":         "ShareType",          # must be "V" (View) for EmailMessage
+    "Visibility":        "Visibility",         # "AllUsers"
 }
 
 
-def write_csv(rows: list[dict], field_map: dict, out_path: Path):
-    """Write rows to a CSV using Salesforce API field names as headers."""
-    if not rows:
-        log.warning("No rows to write for %s", out_path.name)
-        pd.DataFrame(columns=list(field_map.values())).to_csv(out_path, index=False)
-        return
-
-    df = pd.DataFrame(rows)
-
-    # Rename columns to Salesforce API names
-    df = df.rename(columns=field_map)
-
-    # Keep only mapped columns (drop any unmapped internal columns)
-    sf_cols = [c for c in field_map.values() if c in df.columns]
-    df = df[sf_cols]
-
-    # Salesforce expects TRUE/FALSE (not Python True/False)
+def write_csv(rows: list[dict], columns: list[str], out_path: Path, rename: dict = None):
+    """Write rows to CSV, optionally renaming columns."""
+    df = pd.DataFrame(rows) if rows else pd.DataFrame(columns=columns)
+    if rename:
+        df = df.rename(columns=rename)
+    # Keep only the columns we care about (drop internals)
+    out_cols = list(rename.values()) if rename else columns
+    out_cols = [c for c in out_cols if c in df.columns]
+    if out_cols:
+        df = df[out_cols]
     for col in df.select_dtypes(include="bool").columns:
         df[col] = df[col].map({True: "TRUE", False: "FALSE"})
-
     df.to_csv(out_path, index=False, quoting=csv.QUOTE_ALL)
     log.info("  ✔ Written %d rows → %s", len(df), out_path)
+
+
+def build_address_columns(recipients: list[dict]) -> dict[str, dict]:
+    """
+    Collapse per-row recipients into ToAddress/CcAddress/BccAddress strings
+    (semicolon-delimited) keyed by email_id.
+    Salesforce EmailMessage stores these as flat fields, not child rows.
+    The EmailMessageRelation rows are exported separately for person linking.
+    """
+    addr: dict[str, dict] = {}
+    type_map = {"To": "ToAddress", "CC": "CcAddress", "BCC": "BccAddress"}
+    for r in recipients:
+        eid = r["EmailId"]
+        if eid not in addr:
+            addr[eid] = {"ToAddress": [], "CcAddress": [], "BccAddress": []}
+        col = type_map.get(r["RecipientType"], "ToAddress")
+        addr[eid][col].append(r["EmailAddress"])
+    return {
+        eid: {k: ";".join(v) for k, v in cols.items()}
+        for eid, cols in addr.items()
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -353,19 +407,17 @@ def write_csv(rows: list[dict], field_map: dict, out_path: Path):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Extract emails from a PST file and export Salesforce-ready CSVs."
+        description="Extract emails from a PST and export standard Salesforce object CSVs."
     )
     parser.add_argument("--pst",  required=True, help="Path to the .pst file")
     parser.add_argument("--out",  default="./sf_output", help="Output directory (default: ./sf_output)")
     parser.add_argument(
-        "--save-attachments",
-        action="store_true",
+        "--save-attachments", action="store_true",
         help="Save raw attachment binaries to disk inside <out>/attachment_files/",
     )
     parser.add_argument(
-        "--no-body-html",
-        action="store_true",
-        help="Omit HTML body from emails CSV (reduces file size)",
+        "--no-body-html", action="store_true",
+        help="Omit HtmlBody from EmailMessage CSV (reduces file size)",
     )
     args = parser.parse_args()
 
@@ -389,38 +441,48 @@ def main():
     )
     extractor.extract()
 
-    # ---- Optionally drop HTML body --------------------------------------
-    field_map_emails = dict(SF_EMAIL_FIELDS)
-    if args.no_body_html:
-        for row in extractor.emails:
-            row.pop("BodyHtml", None)
-        field_map_emails.pop("BodyHtml", None)
+    # ---- Collapse recipients into ToAddress/CcAddress/BccAddress --------
+    addr_by_email = build_address_columns(extractor.recipients)
+    for email in extractor.emails:
+        addrs = addr_by_email.get(email["Id"], {})
+        email["ToAddress"]  = addrs.get("ToAddress", "")
+        email["CcAddress"]  = addrs.get("CcAddress", "")
+        email["BccAddress"] = addrs.get("BccAddress", "")
+        email["IsClientManaged"] = True   # avoids Status lock & CreatedBy restriction
 
-    # ---- Write CSVs -----------------------------------------------------
-    log.info("Writing CSV files to: %s", out_dir)
-    write_csv(extractor.emails,      field_map_emails,     out_dir / "emails.csv")
-    write_csv(extractor.recipients,  SF_RECIPIENT_FIELDS,  out_dir / "recipients.csv")
-    write_csv(extractor.attachments, SF_ATTACHMENT_FIELDS, out_dir / "attachments.csv")
+    # ---- 1. emails.csv  →  EmailMessage (Insert) ------------------------
+    email_col_map = {
+        "Id":              "ExternalId__c",
+        "Subject":         "Subject",
+        "SenderName":      "FromName",
+        "SenderEmail":     "FromAddress",
+        "SentDate":        "MessageDate",
+        "BodyPlain":       "TextBody",
+        "ToAddress":       "ToAddress",
+        "CcAddress":       "CcAddress",
+        "BccAddress":      "BccAddress",
+        "IsClientManaged": "IsClientManaged",
+        "FolderPath":      "Description",
+    }
+    if not args.no_body_html:
+        email_col_map["BodyHtml"] = "HtmlBody"
 
-    # ---- Summary --------------------------------------------------------
-    print("\n" + "="*60)
-    print("  PST → Salesforce Export Summary")
-    print("="*60)
-    print(f"  PST file   : {pst_path}")
-    print(f"  Output dir : {out_dir.resolve()}")
-    print(f"  Emails     : {len(extractor.emails):,}")
-    print(f"  Recipients : {len(extractor.recipients):,}")
-    print(f"  Attachments: {len(extractor.attachments):,}")
-    if args.save_attachments:
-        print(f"  Files saved: {attach_dir}")
-    print("="*60)
-    print("\nSalesforce Import Order:")
-    print("  1. emails.csv      → EmailMessage__c  (upsert on External_Id__c)")
-    print("  2. recipients.csv  → EmailRecipient__c (upsert on External_Id__c)")
-    print("  3. attachments.csv → Attachment__c    (upsert on External_Id__c)")
-    print("\nTip: Use Salesforce Data Loader or Bulk API with 'Upsert' mode.")
-    print("     Set the 'External ID' field to 'External_Id__c' for all objects.\n")
+    write_csv(extractor.emails, list(email_col_map.keys()),
+              out_dir / "1_emails.csv", rename=email_col_map)
 
-
-if __name__ == "__main__":
-    main()
+    # ---- 2. email_relations.csv  →  EmailMessageRelation (Insert) -------
+    # EmailMessageId here is ExternalId__c — after inserting emails, replace
+    # with real Salesforce Ids using the Data Loader result file.
+    type_to_relation = {"To": "ToAddress", "CC": "CcAddress", "BCC": "BccAddress"}
+    relation_rows = []
+    for r in extractor.recipients:
+        relation_rows.append({
+            "EmailMessageId":  r["EmailId"],        # replace with real SF Id post-insert
+            "RelationType":    type_to_relation.get(r["RecipientType"], "ToAddress"),
+            "RelationAddress": r["EmailAddress"],
+            "DisplayName":     r["DisplayName"],
+            "RelationId":      "",  # fill with Contact/Lead/User SF Id if known
+        })
+    write_csv(
+        relation_rows,
+        ["EmailMessageId", "RelationType", "RelationAddress",
